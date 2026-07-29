@@ -40,7 +40,7 @@ typedef struct _ARK_KERNEL_PROCESS_ENTRY {
 
 /** @brief View B：PsLookupProcessByProcessId 命中标志。 */
 #define ARK_FLAG_VIEW_CID       0x00000002UL
-/** @brief View C：线程归属进程命中标志。 */
+/** @brief View C：系统句柄快照中 Process/Thread 对象命中标志。 */
 #define ARK_FLAG_VIEW_THREAD    0x00000004UL
 
 /**
@@ -50,7 +50,7 @@ typedef struct _ARK_KERNEL_VIEWS_RESPONSE {
     ULONG Status;                                           /**< NTSTATUS 状态码（ULONG 形式） */
     ULONG MaxPidScanned;                                    /**< 实际扫描的 PID 上限 */
     ULONG CidCount;                                         /**< View B 命中条目计数 */
-    ULONG ThreadCount;                                      /**< View C 命中条目计数 */
+    ULONG ThreadCount;                                      /**< View C：系统句柄快照命中条目计数 */
     ULONG EntryCount;                                       /**< Entries 有效条目数（B|C 去重合并） */
     ARK_KERNEL_PROCESS_ENTRY Entries[ARK_MAX_PROCESS_ENTRIES]; /**< 进程条目数组 */
 } ARK_KERNEL_VIEWS_RESPONSE;

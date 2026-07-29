@@ -106,6 +106,7 @@
     <ClInclude Include="DetectHidden.h" />
     <ClInclude Include="DriverEntry.h" />
     <ClInclude Include="Log.h" />
+    <ClInclude Include="undocument.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

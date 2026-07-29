@@ -100,7 +100,7 @@ std::string buildHiddenReason(ULONG viewFlags) {
         reason += "cid+";
     }
     if ((viewFlags & ARK_FLAG_VIEW_THREAD) != 0) {
-        reason += "thread+";
+        reason += "handle+";
     }
     if (!reason.empty() && reason.back() == '+') {
         reason.pop_back();

@@ -1,21 +1,45 @@
 #include "DetectHidden.h"
+#include "undocument.h"
 #include "Log.h"
 
 #include <ntstrsafe.h>
 
 /** @brief 获取进程映像短名（内核未文档化导出）。 */
 NTKERNELAPI CHAR* PsGetProcessImageFileName(_In_ PEPROCESS Process);
-/** @brief 进程对象类型，用于 ObOpenObjectByPointer。 */
+/** @brief 进程对象类型，用于 ObOpenObjectByPointer / 句柄对象过滤。 */
 extern POBJECT_TYPE* PsProcessType;
+/** @brief 线程对象类型，用于句柄快照 Thread 对象过滤。 */
+extern POBJECT_TYPE* PsThreadType;
 
 #ifndef PROCESS_QUERY_LIMITED_INFORMATION
 #define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
 #endif
 
-/* ProcessInformationClass=ProcessTimes(4)，用于读取 ExitTime。 */
-#define ARK_PROCESS_TIMES ((PROCESSINFOCLASS)4)
-/* ProcessInformationClass=ProcessHandleCount(20)，用于读取句柄数量。 */
-#define ARK_PROCESS_HANDLE_COUNT ((PROCESSINFOCLASS)20)
+#ifndef THREAD_QUERY_LIMITED_INFORMATION
+#define THREAD_QUERY_LIMITED_INFORMATION 0x0800
+#endif
+
+
+/**
+ * @brief SystemHandleInformation 单条句柄记录。
+ */
+typedef struct _ARK_SYSTEM_HANDLE_TABLE_ENTRY_INFO {
+    USHORT UniqueProcessId;         /**< 持有该句柄的进程 PID（USHORT） */
+    USHORT CreatorBackTraceIndex;   /**< 创建回溯索引 */
+    UCHAR ObjectTypeIndex;          /**< 对象类型索引 */
+    UCHAR HandleAttributes;         /**< 句柄属性 */
+    USHORT HandleValue;             /**< 句柄值 */
+    PVOID Object;                   /**< 内核对象指针 */
+    ULONG GrantedAccess;            /**< 授予的访问权限 */
+} ARK_SYSTEM_HANDLE_TABLE_ENTRY_INFO;
+
+/**
+ * @brief SystemHandleInformation 返回缓冲区头。
+ */
+typedef struct _ARK_SYSTEM_HANDLE_INFORMATION {
+    ULONG NumberOfHandles;                          /**< 句柄条目数量 */
+    ARK_SYSTEM_HANDLE_TABLE_ENTRY_INFO Handles[1];   /**< 可变长句柄数组 */
+} ARK_SYSTEM_HANDLE_INFORMATION;
 
 /** @brief ZwQueryInformationProcess(ProcessTimes) 返回的进程时间结构。 */
 typedef struct _ARK_KERNEL_USER_TIMES {
@@ -24,14 +48,6 @@ typedef struct _ARK_KERNEL_USER_TIMES {
     LARGE_INTEGER KernelTime;  /**< 内核态累计 CPU 时间 */
     LARGE_INTEGER UserTime;    /**< 用户态累计 CPU 时间 */
 } ARK_KERNEL_USER_TIMES;
-
-/** @brief 内核态 ZwQueryInformationProcess 声明（未导出到头文件）。 */
-NTSYSAPI NTSTATUS NTAPI ZwQueryInformationProcess(
-    _In_ HANDLE ProcessHandle,
-    _In_ PROCESSINFOCLASS ProcessInformationClass,
-    _Out_writes_bytes_(ProcessInformationLength) PVOID ProcessInformation,
-    _In_ ULONG ProcessInformationLength,
-    _Out_opt_ PULONG ReturnLength);
 
 /**
  * @brief PID 收集累加器，合并 View B/C 扫描结果。
@@ -42,22 +58,20 @@ typedef struct _ARK_PID_ACCUMULATOR {
     ARK_KERNEL_PROCESS_ENTRY* entries;     /**< 进程条目数组 */
     ULONG entryCount;                    /**< 当前条目数 */
     ULONG cidCount;                      /**< View B 命中计数 */
-    ULONG threadCount;                   /**< View C 命中计数 */
+    ULONG threadCount;                   /**< View C：系统句柄快照命中计数 */
 } ARK_PID_ACCUMULATOR;
 
 /**
  * @brief 判断进程是否为已退出/僵尸进程。
  *
- * 判定条件（满足其一即为死亡）：
- * 1) ExitTime != 0（ProcessTimes）
- * 2) HandleCount == 0（ProcessHandleCount）
- *
- * 优先使用已有 EPROCESS 经 ObOpenObjectByPointer 打开句柄；
- * 打开或任一查询失败时按已死亡处理。
+ * 判定顺序：
+ * 1) 若有 EPROCESS：PsGetProcessExitStatus != STATUS_PENDING 视为已退出
+ * 2) ZwOpenProcess + ProcessTimes：ExitTime != 0 视为已退出（直接返回，不再查句柄数）
+ * 3) ExitTime == 0 时再查 ProcessHandleCount：HandleCount == 0 视为已退出
  *
  * @param pid 进程 PID。
- * @param process 可选 EPROCESS 指针，非空时优先使用。
- * @return TRUE 表示已死亡应跳过，FALSE 表示仍存活。
+ * @param process 可选 EPROCESS 指针，非空时优先检查退出状态。
+ * @return TRUE 表示已死亡应跳过，FALSE 表示仍存活或无法判定为死亡。
  * @irql PASSIVE_LEVEL
  */
 static BOOLEAN IsDeadProcess(
@@ -67,61 +81,62 @@ static BOOLEAN IsDeadProcess(
     HANDLE processHandle = NULL;
     NTSTATUS status = STATUS_SUCCESS;
     ARK_KERNEL_USER_TIMES processTimes = { 0 };
+    CLIENT_ID clientId = { 0 };
+    OBJECT_ATTRIBUTES objectAttributes = { 0 };
     ULONG handleCount = 0;
-    BOOLEAN isDead = TRUE;
+    BOOLEAN isDead = FALSE;
     if (pid == 0UL) {
         return TRUE;
     }
     if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
         return TRUE;
     }
-    if (process != NULL && PsProcessType != NULL && *PsProcessType != NULL) {
-        status = ObOpenObjectByPointer(
-            process,
-            OBJ_KERNEL_HANDLE,
-            NULL,
-            PROCESS_QUERY_LIMITED_INFORMATION,
-            *PsProcessType,
-            KernelMode,
-            &processHandle);
-    } else {
-        CLIENT_ID clientId = { 0 };
-        OBJECT_ATTRIBUTES objectAttributes = { 0 };
-        clientId.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
-        clientId.UniqueThread = NULL;
-        InitializeObjectAttributes(&objectAttributes, NULL, 0, NULL, NULL);
-        status = ZwOpenProcess(
-            &processHandle,
-            PROCESS_QUERY_LIMITED_INFORMATION,
-            &objectAttributes,
-            &clientId);
+    /* 直接读 EPROCESS 退出状态，避免 ProcessTimes 与 ExitTime 字段不一致导致漏判。 */
+    if (process != NULL) {
+        status = PsGetProcessExitStatus(process);
+        if (status != STATUS_PENDING) {
+            return TRUE;
+        }
     }
+    clientId.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
+    clientId.UniqueThread = NULL;
+    InitializeObjectAttributes(&objectAttributes, NULL, 0, NULL, NULL);
+    status = ZwOpenProcess(
+        &processHandle,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+        &objectAttributes,
+        &clientId);
     if (!NT_SUCCESS(status) || processHandle == NULL) {
-        return TRUE;
+        LOGE("ZwOpenProcess failed,pid=%lu status:%lx", pid, status);
+        return FALSE;
     }
     status = ZwQueryInformationProcess(
         processHandle,
-        ARK_PROCESS_TIMES,
+        ProcessTimes,
         &processTimes,
         sizeof(processTimes),
         NULL);
     if (!NT_SUCCESS(status)) {
+        LOGE("ZwQueryInformationProcess(ProcessTimes) failed,pid=%lu status:%lx", pid, status);
         ZwClose(processHandle);
-        return TRUE;
+        return FALSE;
     }
+    /* ExitTime != 0：已退出，不再做 HandleCount 判定。 */
     if (processTimes.ExitTime.QuadPart != 0LL) {
         ZwClose(processHandle);
         return TRUE;
     }
+    /* ExitTime == 0：再根据句柄数量判断。 */
     status = ZwQueryInformationProcess(
         processHandle,
-        ARK_PROCESS_HANDLE_COUNT,
+        ProcessHandleCount,
         &handleCount,
         sizeof(handleCount),
         NULL);
     if (!NT_SUCCESS(status)) {
+        LOGE("ZwQueryInformationProcess(ProcessHandleCount) failed,pid=%lu status:%lx", pid, status);
         ZwClose(processHandle);
-        return TRUE;
+        return FALSE;
     }
     isDead = (handleCount == 0UL);
     ZwClose(processHandle);
@@ -306,51 +321,157 @@ static NTSTATUS CollectCidView(
 }
 
 /**
- * @brief View C：通过 PsLookupThreadByThreadId 获取线程归属进程。
- *
- * 步进 4 遍历 TID，已在 View B 入表的 PID 跳过重复 ExitTime 检测。
- *
+ * @brief 将存活进程写入系统句柄视图累加器。
  * @param accumulator 累加器（输入输出）。
- * @param scanLimit PID/TID 扫描上限。
- * @return STATUS_SUCCESS。
+ * @param process 已引用的 EPROCESS，函数内不额外引用。
  * @irql PASSIVE_LEVEL
  */
-static NTSTATUS CollectThreadView(
+static VOID AddAliveProcessFromHandleView(
     _Inout_ ARK_PID_ACCUMULATOR* accumulator,
-    _In_ ULONG scanLimit) {
-    ULONG tid = 0;
+    _In_ PEPROCESS process
+) {
+    ULONG pid = 0;
+    if (accumulator == NULL || process == NULL) {
+        return;
+    }
+    pid = HandleToULong(PsGetProcessId(process));
+    if (pid == 0UL) {
+        return;
+    }
+    /* 必须先做死亡判定，禁止因位图已标记而跳过 ExitTime 检查。 */
+    if (IsDeadProcess(pid, process)) {
+        return;
+    }
+    AddProcessToAccumulator(accumulator, pid, ARK_FLAG_VIEW_THREAD, process);
+}
+
+/**
+ * @brief 查询系统句柄快照，失败时释放已有缓冲。
+ * @param handleInfo 输出句柄信息缓冲（调用方释放）。
+ * @return STATUS_SUCCESS 或相应错误码。
+ * @irql PASSIVE_LEVEL
+ */
+static NTSTATUS QuerySystemHandleInformation(
+    _Outptr_result_maybenull_ ARK_SYSTEM_HANDLE_INFORMATION** handleInfo
+) {
+    ULONG bufferSize = 0;
+    ULONG returnLength = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+    ARK_SYSTEM_HANDLE_INFORMATION* buffer = NULL;
+    ULONG retryCount = 0;
+    if (handleInfo == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *handleInfo = NULL;
+    status = ZwQuerySystemInformation(SystemHandleInformation, NULL, 0, &bufferSize);
+    if (status != STATUS_INFO_LENGTH_MISMATCH) {
+        LOGE("ZwQuerySystemInformation size probe failed,status:%lx", status);
+        return status;
+    }
+    do {
+        if (buffer != NULL) {
+            ExFreePoolWithTag(buffer, ARK_HANDLE_TAG);
+            buffer = NULL;
+        }
+        if (returnLength > bufferSize) {
+            bufferSize = returnLength;
+        }
+        bufferSize += PAGE_SIZE;
+#pragma warning(push)
+#pragma warning(disable: 4996)
+        buffer = (ARK_SYSTEM_HANDLE_INFORMATION*)ExAllocatePoolWithTag(
+            NonPagedPool,
+            bufferSize,
+            ARK_HANDLE_TAG);
+#pragma warning(pop)
+        if (buffer == NULL) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(buffer, bufferSize);
+        status = ZwQuerySystemInformation(
+            SystemHandleInformation,
+            buffer,
+            bufferSize,
+            &returnLength);
+        retryCount++;
+    } while (status == STATUS_INFO_LENGTH_MISMATCH && retryCount < 8UL);
+    if (!NT_SUCCESS(status)) {
+        LOGE("ZwQuerySystemInformation failed,status:%lx", status);
+        ExFreePoolWithTag(buffer, ARK_HANDLE_TAG);
+        return status;
+    }
+    *handleInfo = buffer;
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief View C：遍历 SystemHandleInformation 全部句柄，筛选 Process/Thread 对象。
+ *
+ * 对快照中每一项做类型引用校验；Process 直接入表，Thread 经 IoThreadToProcess 反推所属进程。
+ * 无 PID 扫描上限，以 NumberOfHandles 为准完整遍历。
+ *
+ * @param accumulator 累加器（输入输出）。
+ * @return STATUS_SUCCESS 或查询失败状态。
+ * @irql PASSIVE_LEVEL
+ */
+static NTSTATUS CollectSystemHandleView(
+    _Inout_ ARK_PID_ACCUMULATOR* accumulator) {
+    ARK_SYSTEM_HANDLE_INFORMATION* handleInfo = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG index = 0;
     ULONG loopIndex = 0;
-    for (tid = 4UL; tid <= scanLimit; tid += 4UL) {
-        PETHREAD thread = NULL;
-        PEPROCESS process = NULL;
-        PEPROCESS refProcess = NULL;
-        ULONG pid = 0;
-        NTSTATUS status = PsLookupThreadByThreadId((HANDLE)(ULONG_PTR)tid, &thread);
+    if (accumulator == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (PsProcessType == NULL || *PsProcessType == NULL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    status = QuerySystemHandleInformation(&handleInfo);
+    if (!NT_SUCCESS(status) || handleInfo == NULL) {
+        return status;
+    }
+    for (index = 0; index < handleInfo->NumberOfHandles; index++) {
+        PVOID object = handleInfo->Handles[index].Object;
+        PVOID referenced = NULL;
         loopIndex++;
         YieldScanProgress(loopIndex);
-        if (!NT_SUCCESS(status) || thread == NULL) {
+        if (object == NULL) {
             continue;
         }
-        process = IoThreadToProcess(thread);
-        if (process != NULL) {
-            pid = HandleToULong(PsGetProcessId(process));
-            if (pid != 0UL && pid <= scanLimit) {
-                status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)pid, &refProcess);
-                if (NT_SUCCESS(status) && refProcess != NULL) {
-                    /* View B 已收录则跳过 ExitTime 重复查询。 */
-                    if (IsPidBitSet(accumulator->bitmap, accumulator->bitmapBytes, pid) ||
-                        !IsDeadProcess(pid, refProcess)) {
-                        AddProcessToAccumulator(
-                            accumulator,
-                            pid,
-                            ARK_FLAG_VIEW_THREAD,
-                            refProcess);
-                    }
-                    ObDereferenceObject(refProcess);
-                }
+        status = ObReferenceObjectByPointer(
+            object,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            *PsProcessType,
+            KernelMode);
+        if (NT_SUCCESS(status)) {
+            AddAliveProcessFromHandleView(accumulator, (PEPROCESS)object);
+            ObDereferenceObject(object);
+            continue;
+        }
+        if (PsThreadType == NULL || *PsThreadType == NULL) {
+            continue;
+        }
+        status = ObReferenceObjectByPointer(
+            object,
+            THREAD_QUERY_LIMITED_INFORMATION,
+            *PsThreadType,
+            KernelMode);
+        if (!NT_SUCCESS(status)) {
+            continue;
+        }
+        referenced = object;
+        {
+            PEPROCESS ownerProcess = IoThreadToProcess((PETHREAD)referenced);
+            if (ownerProcess != NULL) {
+                AddAliveProcessFromHandleView(accumulator, ownerProcess);
             }
         }
-        ObDereferenceObject(thread);
+        ObDereferenceObject(referenced);
+    }
+    {
+        ULONG handleCount = handleInfo->NumberOfHandles;
+        ExFreePoolWithTag(handleInfo, ARK_HANDLE_TAG);
+        LOGI("system handle view handles=%lu hits=%lu", handleCount, accumulator->threadCount);
     }
     return STATUS_SUCCESS;
 }
@@ -421,7 +542,7 @@ static NTSTATUS InitPidAccumulator(
 /**
  * @brief 收集内核 View B/C 并填充 IOCTL 响应（实现）。
  *
- * 依次执行 CollectCidView、CollectThreadView，结果写入 response。
+ * 依次执行 CollectCidView、CollectSystemHandleView（系统句柄快照 Process/Thread），结果写入 response。
  * 接口说明见 DetectHidden.h。
  *
  * @param response 输出缓冲区，不可为 NULL。
@@ -452,15 +573,15 @@ NTSTATUS QueryKernelProcessViews(
         response->Status = (ULONG)status;
         return status;
     }
-	// 执行 View B/C 扫描
+	// 执行 View B 扫描
     status = CollectCidView(&accumulator, scanLimit);
     if (!NT_SUCCESS(status)) {
         FreePidAccumulator(&accumulator);
         response->Status = (ULONG)status;
         return status;
     }
-	// 执行 View C 扫描
-    status = CollectThreadView(&accumulator, scanLimit);
+	// 执行 View C：系统句柄快照全量扫描
+    status = CollectSystemHandleView(&accumulator);
     if (!NT_SUCCESS(status)) {
         FreePidAccumulator(&accumulator);
         response->Status = (ULONG)status;

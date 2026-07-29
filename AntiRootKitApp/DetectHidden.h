@@ -24,7 +24,7 @@ struct CrossDetectResult {
     std::uint32_t status = 0;           /**< 操作状态码，ERROR_SUCCESS 表示成功 */
     std::uint32_t r3Count = 0;          /**< View A：R3 枚举进程数 */
     std::uint32_t cidCount = 0;         /**< View B：内核 CID 命中数 */
-    std::uint32_t threadCount = 0;      /**< View C：内核线程归属命中数 */
+    std::uint32_t threadCount = 0;      /**< View C：系统句柄快照 Process/Thread 命中数 */
     std::uint32_t kernelUnionCount = 0; /**< 内核 B|C 合并去重后的进程数 */
     std::uint32_t maxPidScanned = 0;    /**< 内核扫描 PID 上限 */
     std::vector<HiddenProcessEntry> hiddenProcesses; /**< 隐藏进程列表，公式：(B union C)-A */
