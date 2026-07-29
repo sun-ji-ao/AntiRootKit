@@ -93,6 +93,27 @@ DWORD installDriver(const std::filesystem::path& driverPath) {
             CloseServiceHandle(serviceManager);
             return status;
         }
+    } else {
+        /* 服务已存在时同步更新 ImagePath，避免仍加载旧路径下的 sys。 */
+        const std::string driverPathA = driverPath.string();
+        if (!ChangeServiceConfigA(
+            service,
+            SERVICE_KERNEL_DRIVER,
+            SERVICE_DEMAND_START,
+            SERVICE_ERROR_NORMAL,
+            driverPathA.c_str(),
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            SERVICENAME)) {
+            status = GetLastError();
+            logError("InstallDriver Failed to ChangeServiceConfig %s LastError: 0x%x.", SERVICENAME, status);
+            CloseServiceHandle(service);
+            CloseServiceHandle(serviceManager);
+            return status;
+        }
     }
     SERVICE_STATUS_PROCESS serviceStatus = {};
     DWORD bytesNeeded = 0;

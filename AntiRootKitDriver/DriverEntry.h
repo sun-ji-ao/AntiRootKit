@@ -17,6 +17,8 @@
 #define ARK_BITMAP_TAG 'BRKA'
 /** @brief 内核非分页池分配标签（系统句柄快照）。 */
 #define ARK_HANDLE_TAG 'HKRA'
+/** @brief 内核非分页池分配标签（模块条目）。 */
+#define ARK_MODULE_TAG 'MKRA'
 
 /** @brief 全局驱动对象指针，供卸载等路径使用。 */
 extern PDRIVER_OBJECT g_pMyDriverObject;

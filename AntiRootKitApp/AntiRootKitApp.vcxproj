@@ -127,14 +127,16 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="DetectHidden.cpp" />
+    <ClCompile Include="DetectHiddenProcess.cpp" />
+    <ClCompile Include="DetectHiddenModule.cpp" />
     <ClCompile Include="DriveRelated.cpp" />
     <ClCompile Include="json_report_writer.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\include\Common.h" />
-    <ClInclude Include="DetectHidden.h" />
+    <ClInclude Include="DetectHiddenProcess.h" />
+    <ClInclude Include="DetectHiddenModule.h" />
     <ClInclude Include="DriveRelated.h" />
     <ClInclude Include="json_report_writer.h" />
   </ItemGroup>

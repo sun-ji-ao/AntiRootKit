@@ -1,4 +1,4 @@
-#include "DetectHidden.h"
+#include "DetectHiddenProcess.h"
 
 #include "../include/Common.h"
 

@@ -1,4 +1,4 @@
-#include "DetectHidden.h"
+#include "DetectHiddenProcess.h"
 #include "undocument.h"
 #include "Log.h"
 
@@ -543,7 +543,7 @@ static NTSTATUS InitPidAccumulator(
  * @brief 收集内核 View B/C 并填充 IOCTL 响应（实现）。
  *
  * 依次执行 CollectCidView、CollectSystemHandleView（系统句柄快照 Process/Thread），结果写入 response。
- * 接口说明见 DetectHidden.h。
+ * 接口说明见 DetectHiddenProcess.h。
  *
  * @param response 输出缓冲区，不可为 NULL。
  * @return STATUS_SUCCESS 或相应错误码。

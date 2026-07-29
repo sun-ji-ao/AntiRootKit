@@ -1,5 +1,6 @@
 #include "DriverEntry.h"
-#include "DetectHidden.h"
+#include "DetectHiddenProcess.h"
+#include "DetectHiddenModule.h"
 #include "Log.h"
 
 /** @brief 全局驱动对象，DriverEntry 成功后赋值，卸载时清空。 */
@@ -52,7 +53,7 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject) {
 /**
  * @brief IRP_MJ_DEVICE_CONTROL 分发例程，处理应用层 IOCTL。
  *
- * 当前支持 IOCTL_ARK_QUERY_KERNEL_VIEWS，使用 METHOD_BUFFERED。
+ * 当前支持 IOCTL_ARK_QUERY_KERNEL_VIEWS / IOCTL_ARK_QUERY_KERNEL_MODULE_VIEWS。
  *
  * @param DeviceObject 设备对象（未使用）。
  * @param Irp 当前 IRP，SystemBuffer 作为输入输出缓冲区。
@@ -87,6 +88,22 @@ NTSTATUS DeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         status = QueryKernelProcessViews(response);
         if (NT_SUCCESS(status)) {
             information = sizeof(ARK_KERNEL_VIEWS_RESPONSE);
+        }
+        break;
+    }
+    case IOCTL_ARK_QUERY_KERNEL_MODULE_VIEWS: {
+        ARK_KERNEL_MODULE_VIEWS_RESPONSE* response = NULL;
+        if (systemBuffer == NULL || outputLength < sizeof(ARK_KERNEL_MODULE_VIEWS_RESPONSE)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            LOGE("Module output buffer too small, need:%lu got:%lu",
+                 (ULONG)sizeof(ARK_KERNEL_MODULE_VIEWS_RESPONSE), outputLength);
+            break;
+        }
+        UNREFERENCED_PARAMETER(inputLength);
+        response = (ARK_KERNEL_MODULE_VIEWS_RESPONSE*)systemBuffer;
+        status = QueryKernelModuleViews(response);
+        if (NT_SUCCESS(status)) {
+            information = sizeof(ARK_KERNEL_MODULE_VIEWS_RESPONSE);
         }
         break;
     }
