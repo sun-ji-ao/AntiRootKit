@@ -1,0 +1,55 @@
+# Visual Studio
+.vs/
+**/.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.vsidx
+
+# Build output directories
+[Bb]in/
+[Oo]bj/
+x64/
+Win32/
+ARM64/
+Debug/
+Release/
+**/x64/
+**/Win32/
+**/ARM64/
+**/Debug/
+**/Release/
+
+# Intermediate / binary
+*.obj
+*.o
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.idb
+*.exp
+*.lib
+*.tlog
+*.recipe
+*.log
+*.pch
+*.ipch
+*.pgc
+*.pgd
+*.db
+*.opendb
+*.sbr
+*.bsc
+*.aps
+
+# Optional: keep built binaries out of git
+*.exe
+*.sys
+*.dll
+*.msi
+*.cab
+*.map
