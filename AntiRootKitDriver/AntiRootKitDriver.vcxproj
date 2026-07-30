@@ -100,12 +100,14 @@
   <ItemGroup>
     <ClCompile Include="DetectHiddenProcess.c" />
     <ClCompile Include="DetectHiddenModule.c" />
+    <ClCompile Include="DetectHiddenPort.c" />
     <ClCompile Include="DriverEntry.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\include\Common.h" />
     <ClInclude Include="DetectHiddenProcess.h" />
     <ClInclude Include="DetectHiddenModule.h" />
+    <ClInclude Include="DetectHiddenPort.h" />
     <ClInclude Include="DriverEntry.h" />
     <ClInclude Include="Log.h" />
     <ClInclude Include="undocument.h" />

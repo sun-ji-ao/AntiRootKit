@@ -19,6 +19,8 @@
 #define ARK_HANDLE_TAG 'HKRA'
 /** @brief 内核非分页池分配标签（模块条目）。 */
 #define ARK_MODULE_TAG 'MKRA'
+/** @brief 内核非分页池分配标签（端口枚举临时缓冲）。 */
+#define ARK_PORT_TAG 'PKRA'
 
 /** @brief 全局驱动对象指针，供卸载等路径使用。 */
 extern PDRIVER_OBJECT g_pMyDriverObject;

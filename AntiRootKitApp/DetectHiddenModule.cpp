@@ -2,7 +2,6 @@
 
 #include "../include/Common.h"
 
-#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <memory>
@@ -19,7 +18,7 @@ namespace {
  * @brief R3 枚举到的单条模块信息。
  */
 struct R3ModuleEntry {
-    ULONG64 imageBase = 0; /**< 映像基址 */
+    ULONG64 imageBase = 0;  /**< 映像基址 */
     std::string moduleName; /**< 模块短名 */
     std::string modulePath; /**< 模块完整路径 */
 };
@@ -124,20 +123,21 @@ bool enumerateR3Modules(std::vector<R3ModuleEntry>& modules) {
 
 /**
  * @brief 判断内核模块条目是否为交叉对比中的无效/误报样本。
+ *
+ * 当前 View C 仅 BigPool：要求有效短名；非残留条目还要求 ImageBase/ImageSize 有效。
+ *
  * @param entry 内核返回的模块条目。
  * @return 应过滤返回 true。
  */
 bool isFalsePositiveKernelModule(const ARK_KERNEL_MODULE_ENTRY& entry) {
+    const bool hasResidual = (entry.ViewFlags & ARK_FLAG_VIEW_RESIDUAL) != 0;
+    if (entry.ModuleName[0] == '\0' || _stricmp(entry.ModuleName, "unknown") == 0) {
+        return true;
+    }
     if (entry.ImageBase == 0) {
         return true;
     }
-    if (entry.ImageSize == 0) {
-        return true;
-    }
-    if (entry.ModuleName[0] == '\0') {
-        return true;
-    }
-    if (_stricmp(entry.ModuleName, "unknown") == 0) {
+    if (entry.ImageSize == 0 && !hasResidual) {
         return true;
     }
     return false;
@@ -156,15 +156,20 @@ std::string buildHiddenModuleReason(ULONG viewFlags) {
     if ((viewFlags & ARK_FLAG_VIEW_DRIVEROBJ) != 0) {
         reason += "driverobj+";
     }
+    if ((viewFlags & ARK_FLAG_RESIDUAL_POOL) != 0) {
+        reason += "bigpool+";
+    } else if ((viewFlags & ARK_FLAG_VIEW_RESIDUAL) != 0) {
+        reason += "residual+";
+    }
     if (!reason.empty() && reason.back() == '+') {
         reason.pop_back();
     }
-    reason += " present in kernel A|B but missing in r3_enum";
+    reason += " present in kernel A|B|C but missing in r3_enum";
     return reason;
 }
 
 /**
- * @brief 通过 IOCTL 向驱动查询内核模块 View A/B。
+ * @brief 通过 IOCTL 向驱动查询内核模块 View A/B/C。
  * @param response 驱动返回的内核模块视图数据（输出）。
  * @return 查询成功返回 true。
  */
@@ -204,12 +209,29 @@ bool queryKernelModuleViews(ARK_KERNEL_MODULE_VIEWS_RESPONSE& response) {
     return true;
 }
 
+/**
+ * @brief 将内核条目转换为隐藏模块输出记录。
+ * @param kernelEntry 内核返回条目。
+ * @return 填充后的 HiddenModuleEntry。
+ */
+HiddenModuleEntry buildHiddenModuleEntry(const ARK_KERNEL_MODULE_ENTRY& kernelEntry) {
+    HiddenModuleEntry hiddenEntry;
+    hiddenEntry.viewFlags = kernelEntry.ViewFlags;
+    hiddenEntry.imageSize = kernelEntry.ImageSize;
+    hiddenEntry.imageBase = kernelEntry.ImageBase;
+    hiddenEntry.driverObjectAddress = kernelEntry.DriverObjectAddress;
+    hiddenEntry.moduleName = kernelEntry.ModuleName;
+    hiddenEntry.modulePath = kernelEntry.ModulePath;
+    hiddenEntry.reason = buildHiddenModuleReason(kernelEntry.ViewFlags);
+    return hiddenEntry;
+}
+
 } // namespace
 
 /**
  * @brief 执行跨视图隐藏模块检测（实现）。
  *
- * 流程：IOCTL 获取内核 View A/B -> R3 枚举 -> Hidden=(A union B)-R3。
+ * 流程：IOCTL 获取内核 View A/B/C -> R3 枚举 -> Hidden=(A|B|C)-R3。
  *
  * @return CrossDetectModuleResult；失败时 status 为 Win32 错误码。
  */
@@ -230,6 +252,7 @@ CrossDetectModuleResult crossDetectHiddenModules() {
     result.r3Count = static_cast<std::uint32_t>(r3Modules.size());
     result.sectionCount = kernelViews->SectionCount;
     result.driverCount = kernelViews->DriverCount;
+    result.residualCount = kernelViews->ResidualCount;
     result.kernelUnionCount = kernelViews->EntryCount;
     for (ULONG index = 0; index < kernelViews->EntryCount && index < ARK_MAX_MODULE_ENTRIES; ++index) {
         const ARK_KERNEL_MODULE_ENTRY& kernelEntry = kernelViews->Entries[index];
@@ -242,15 +265,7 @@ CrossDetectModuleResult crossDetectHiddenModules() {
         if (result.hiddenModules.size() >= ARK_MAX_MODULE_ENTRIES) {
             break;
         }
-        HiddenModuleEntry hiddenEntry;
-        hiddenEntry.viewFlags = kernelEntry.ViewFlags;
-        hiddenEntry.imageSize = kernelEntry.ImageSize;
-        hiddenEntry.imageBase = kernelEntry.ImageBase;
-        hiddenEntry.driverObjectAddress = kernelEntry.DriverObjectAddress;
-        hiddenEntry.moduleName = kernelEntry.ModuleName;
-        hiddenEntry.modulePath = kernelEntry.ModulePath;
-        hiddenEntry.reason = buildHiddenModuleReason(kernelEntry.ViewFlags);
-        result.hiddenModules.push_back(std::move(hiddenEntry));
+        result.hiddenModules.push_back(buildHiddenModuleEntry(kernelEntry));
     }
     return result;
 }

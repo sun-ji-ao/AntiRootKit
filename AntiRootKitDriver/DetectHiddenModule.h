@@ -3,10 +3,11 @@
 #include "DriverEntry.h"
 
 /**
- * @brief 收集内核模块 View A/B 列表（DriverSection + \\Driver 对象）。
+ * @brief 收集内核模块多视图列表并填充 IOCTL 输出缓冲。
  *
- * View A：遍历当前驱动 DriverSection->InLoadOrderLinks（PsLoadedModuleList）。
- * View B：枚举 \\Driver 对象目录，经 ObReferenceObjectByName 取得 DRIVER_OBJECT。
+ * View A：从当前驱动 DriverSection 遍历 PsLoadedModuleList。
+ * View B：枚举 \\Driver 对象目录并解析 DRIVER_OBJECT。
+ * View C：SystemBigPool 完整 Native PE 残留（SizeOfImage/目录校验去误报，软失败）。
  *
  * @param response 输出缓冲区，填充 ARK_KERNEL_MODULE_VIEWS_RESPONSE。
  * @return 成功返回 STATUS_SUCCESS；参数无效或 IRQL 不正确时返回相应 NTSTATUS。

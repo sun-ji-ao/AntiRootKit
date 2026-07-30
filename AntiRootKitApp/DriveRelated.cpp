@@ -150,6 +150,15 @@ DWORD installDriver(const std::filesystem::path& driverPath) {
             status = ERROR_SUCCESS;
         } else {
             logError("InstallDriver Failed to StartService %s LastError: 0x%x.", SERVICENAME, status);
+            if (status == ERROR_PROC_NOT_FOUND || status == 0x7F) {
+                logError("Hint: 0x7F/ERROR_PROC_NOT_FOUND often means driver image load failed.");
+                logError("Hint: 1) Run elevated  2) bcdedit /set testsigning on && reboot");
+                logError("Hint: 3) Keep AntiRootKitDriver.sys beside exe  4) sc delete ARK then retry");
+            } else if (status == ERROR_INVALID_IMAGE_HASH || status == 577) {
+                logError("Hint: driver signature rejected. Enable testsigning and reboot.");
+            } else if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+                logError("Hint: ImagePath invalid. sys missing at: %s", driverPath.string().c_str());
+            }
         }
     } else {
         logInfo("InstallDriver StartService %s success.", SERVICENAME);

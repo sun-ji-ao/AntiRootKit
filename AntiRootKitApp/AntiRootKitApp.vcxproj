@@ -129,6 +129,7 @@
   <ItemGroup>
     <ClCompile Include="DetectHiddenProcess.cpp" />
     <ClCompile Include="DetectHiddenModule.cpp" />
+    <ClCompile Include="DetectHiddenPort.cpp" />
     <ClCompile Include="DriveRelated.cpp" />
     <ClCompile Include="json_report_writer.cpp" />
     <ClCompile Include="main.cpp" />
@@ -137,6 +138,7 @@
     <ClInclude Include="..\include\Common.h" />
     <ClInclude Include="DetectHiddenProcess.h" />
     <ClInclude Include="DetectHiddenModule.h" />
+    <ClInclude Include="DetectHiddenPort.h" />
     <ClInclude Include="DriveRelated.h" />
     <ClInclude Include="json_report_writer.h" />
   </ItemGroup>
