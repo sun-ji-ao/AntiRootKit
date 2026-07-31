@@ -53,7 +53,7 @@
 #define ARK_FLAG_VIEW_PORT_UDP  0x00000002UL
 /** @brief 端口 View B：系统句柄快照中 \\Device\\Afd 文件对象命中标志。 */
 #define ARK_FLAG_VIEW_PORT_AFD  0x00000004UL
-/** @brief 端口协议未知（AFD 句柄视图未解析到具体协议时）。 */
+/** @brief 端口协议未知（AFD 未能解析协议时）。 */
 #define ARK_PORT_PROTO_UNKNOWN  0UL
 
 #pragma pack(push, 1)
@@ -129,13 +129,13 @@ typedef struct _ARK_KERNEL_MODULE_VIEWS_RESPONSE {
  */
 typedef struct _ARK_KERNEL_PORT_ENTRY {
     ULONG Protocol;              /**< ARK_PORT_PROTO_* */
-    ULONG State;                 /**< TCP 状态；AFD 视图下为该 PID 的 AFD 句柄数 */
+    ULONG State;                 /**< TCP 状态；AFD 视图为 SOCKET_STATE */
     ULONG OwningPid;             /**< 所属进程 PID */
     ULONG ViewFlags;             /**< ARK_FLAG_VIEW_PORT_* */
-    ULONG LocalAddr;             /**< 本地 IPv4（网络字节序）；AFD 视图为 0 */
-    ULONG RemoteAddr;            /**< 远端 IPv4（网络字节序）；AFD 视图为 0 */
-    USHORT LocalPort;            /**< 本地端口（主机字节序）；AFD 视图为 0 */
-    USHORT RemotePort;           /**< 远端端口（主机字节序）；AFD 视图为 0 */
+    ULONG LocalAddr;             /**< 本地 IPv4（网络字节序）；AFD 经 IOCTL 解析，未绑定为 0 */
+    ULONG RemoteAddr;            /**< 远端 IPv4（网络字节序）；AFD 未连接 UDP 等为 0 */
+    USHORT LocalPort;            /**< 本地端口（主机字节序）；AFD 经 IOCTL_AFD_GET_ADDRESS 解析 */
+    USHORT RemotePort;           /**< 远端端口（主机字节序）；AFD 经 IOCTL_AFD_GET_REMOTE_ADDRESS 解析 */
     ULONG64 EndpointObject;      /**< AFD FILE_OBJECT 地址（NSI 视图为 0） */
 } ARK_KERNEL_PORT_ENTRY;
 

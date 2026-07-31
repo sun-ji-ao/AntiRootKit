@@ -333,11 +333,32 @@ std::string buildHiddenPortReason(ULONG viewFlags) {
     if ((viewFlags & ARK_FLAG_VIEW_PORT_UDP) != 0) {
         reason += "udp+";
     }
+    if ((viewFlags & ARK_FLAG_VIEW_PORT_AFD) != 0) {
+        reason += "afd+";
+    }
     if (!reason.empty() && reason.back() == '+') {
         reason.pop_back();
     }
-    reason += " present in kernel NSI but missing in r3_api union(GetExtendedTcp/UdpTable)";
+    if ((viewFlags & ARK_FLAG_VIEW_PORT_AFD) != 0 &&
+        (viewFlags & (ARK_FLAG_VIEW_PORT_TCP | ARK_FLAG_VIEW_PORT_UDP)) == 0) {
+        reason += " present in kernel AFD handle view but missing in r3_api union(GetExtendedTcp/UdpTable)";
+    } else {
+        reason += " present in kernel NSI/AFD but missing in r3_api union(GetExtendedTcp/UdpTable)";
+    }
     return reason;
+}
+
+/**
+ * @brief 判断 AFD 视图条目是否已解析出可用地址（本地或远端）。
+ */
+bool afdKernelEntryHasAddress(const ARK_KERNEL_PORT_ENTRY& entry) {
+    if ((entry.ViewFlags & ARK_FLAG_VIEW_PORT_AFD) == 0) {
+        return false;
+    }
+    return entry.LocalPort != 0 ||
+           entry.LocalAddr != 0 ||
+           entry.RemotePort != 0 ||
+           entry.RemoteAddr != 0;
 }
 
 /**
@@ -559,7 +580,7 @@ bool isBoundStateFalsePositive(
  * @brief 去除隐藏端口误报（移植自 FilterHiddenPorts，去掉厂商私有信任逻辑）。
  *
  * 规则顺序：
- * 1) 剔除纯 AFD 视图条目（无端口五元组，易误报）
+ * 1) 剔除未解析出地址的纯 AFD 视图条目（无五元组）
  * 2) 同一 PID 隐藏条数 > 3 整组剔除
  * 3) Win10+ Bound 表匹配的监听/回环
  * 4) 未连接形态（RemotePort==0 / 空远端）
@@ -575,13 +596,17 @@ std::uint32_t filterHiddenPorts(std::vector<HiddenPortEntry>& hiddenPorts) {
     if (hiddenPorts.empty()) {
         return 0;
     }
-    /* 1) AFD 仅作内核统计，不作为隐藏端口结论。 */
+    /* 1) 无地址的 AFD 条目仍不参与隐藏结论。 */
     hiddenPorts.erase(
         std::remove_if(
             hiddenPorts.begin(),
             hiddenPorts.end(),
             [](const HiddenPortEntry& entry) {
-                return (entry.viewFlags & ARK_FLAG_VIEW_PORT_AFD) != 0;
+                return (entry.viewFlags & ARK_FLAG_VIEW_PORT_AFD) != 0 &&
+                       entry.localPort == 0 &&
+                       entry.localAddr == 0 &&
+                       entry.remotePort == 0 &&
+                       entry.remoteAddr == 0;
             }),
         hiddenPorts.end());
     std::unordered_map<ULONG, int> pidCount;
@@ -644,8 +669,8 @@ std::uint32_t filterHiddenPorts(std::vector<HiddenPortEntry>& hiddenPorts) {
 /**
  * @brief 执行跨视图隐藏端口检测。
  *
- * 流程：R3 前快照 → 内核 AFD/NSI → R3 后快照并集 → Hidden = NSI − R3 → FilterHiddenPorts。
- * View B（AFD）仅计入统计，不参与隐藏差分。
+ * 流程：R3 前快照 → 内核 AFD/NSI → R3 后快照并集 → Hidden = (NSI ∪ AFD) − R3 → FilterHiddenPorts。
+ * View B（AFD）在已解析出地址时参与隐藏差分。
  *
  * @return CrossDetectPortResult；失败时 status 为 Win32 错误码。
  */
@@ -687,8 +712,9 @@ CrossDetectPortResult crossDetectHiddenPorts() {
     result.kernelUnionCount = kernelViews->EntryCount;
     for (ULONG index = 0; index < kernelViews->EntryCount && index < ARK_MAX_PORT_ENTRIES; ++index) {
         const ARK_KERNEL_PORT_ENTRY& kernelEntry = kernelViews->Entries[index];
-        /* AFD 不参与隐藏差分，避免句柄视图误报；仍保留内核计数供报告。 */
-        if ((kernelEntry.ViewFlags & ARK_FLAG_VIEW_PORT_AFD) != 0) {
+        /* 无地址的 AFD 仍跳过；已解析地址的 AFD 参与差分。 */
+        if ((kernelEntry.ViewFlags & ARK_FLAG_VIEW_PORT_AFD) != 0 &&
+            !afdKernelEntryHasAddress(kernelEntry)) {
             continue;
         }
         if (isPortInR3Set(

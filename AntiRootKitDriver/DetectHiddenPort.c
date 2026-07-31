@@ -24,6 +24,87 @@
 #define ARK_AFD_NAME_INFO_BYTES     0x400UL
 /** @brief AFD View B 按 PID 聚合的最大槽位数。 */
 #define ARK_AFD_MAX_PID_SLOTS       512UL
+/** @brief 单次扫描最多对 AFD 句柄发起地址查询的次数。 */
+#define ARK_AFD_MAX_ADDRESS_QUERIES 2048UL
+/** @brief AFD GET_ADDRESS / GET_REMOTE_ADDRESS 输出缓冲大小。 */
+#define ARK_AFD_ADDRESS_BUFFER_BYTES 256UL
+/** @brief AFD GET_CONTEXT 输出缓冲大小（SOCK_SHARED_INFO）。 */
+#define ARK_AFD_CONTEXT_BUFFER_BYTES 512UL
+
+/** @brief AFD IOCTL：获取本地地址（METHOD_NEITHER，输出 AFD_ADDRESS）。 */
+#define ARK_IOCTL_AFD_GET_ADDRESS         0x0001202FUL
+/** @brief AFD IOCTL：获取远端地址（METHOD_NEITHER，输出 AFD_ADDRESS）。 */
+#define ARK_IOCTL_AFD_GET_REMOTE_ADDRESS  0x0001203FUL
+/** @brief AFD IOCTL：获取套接字上下文（METHOD_NEITHER，输出 SOCK_SHARED_INFO）。 */
+#define ARK_IOCTL_AFD_GET_CONTEXT         0x00012043UL
+
+/** @brief IPv4 地址族。 */
+#define ARK_AF_INET                 2UL
+/** @brief TDI IPv4 地址类型。 */
+#define ARK_TDI_ADDRESS_TYPE_IP     2UL
+/** @brief IPPROTO_TCP。 */
+#define ARK_IPPROTO_TCP             6UL
+/** @brief IPPROTO_UDP。 */
+#define ARK_IPPROTO_UDP             17UL
+
+#ifndef PROCESS_DUP_HANDLE
+#define PROCESS_DUP_HANDLE          0x0040UL
+#endif
+
+/** @brief 最小 IPv4 SOCKADDR_IN（内核侧布局）。 */
+typedef struct _ARK_SOCKADDR_IN {
+    USHORT sin_family;
+    USHORT sin_port;
+    ULONG sin_addr;
+    UCHAR sin_zero[8];
+} ARK_SOCKADDR_IN;
+
+/** @brief TDI IPv4 地址体。 */
+typedef struct _ARK_TDI_ADDRESS_IP {
+    USHORT sin_port;
+    ULONG in_addr;
+} ARK_TDI_ADDRESS_IP;
+
+/** @brief TA_ADDRESS 头（后跟 AddressLength 字节地址体）。 */
+typedef struct _ARK_TA_ADDRESS {
+    USHORT AddressLength;
+    USHORT AddressType;
+    UCHAR Address[1];
+} ARK_TA_ADDRESS;
+
+/** @brief TDI TRANSPORT_ADDRESS 头。 */
+typedef struct _ARK_TDI_ADDRESS {
+    ULONG TAAddressCount;
+    ARK_TA_ADDRESS Address[1];
+} ARK_TDI_ADDRESS;
+
+/** @brief TDI_ADDRESS_INFO（TDI/hybrid 套接字 GET_ADDRESS 输出）。 */
+typedef struct _ARK_TDI_ADDRESS_INFO {
+    ULONG ActivityCount;
+    ARK_TDI_ADDRESS Address;
+} ARK_TDI_ADDRESS_INFO;
+
+/** @brief AFD GET_CONTEXT 返回的套接字共享信息（仅使用前几字段）。 */
+typedef struct _ARK_SOCK_SHARED_INFO {
+    LONG State;
+    LONG AddressFamily;
+    LONG SocketType;
+    LONG Protocol;
+} ARK_SOCK_SHARED_INFO;
+
+/**
+ * @brief 从 AFD 句柄解析出的端点地址与协议。
+ */
+typedef struct _ARK_AFD_PARSED_ENDPOINT {
+    ULONG Protocol;
+    ULONG State;
+    ULONG LocalAddr;
+    ULONG RemoteAddr;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    BOOLEAN HasLocal;
+    BOOLEAN HasRemote;
+} ARK_AFD_PARSED_ENDPOINT;
 
 /** @brief 文件对象类型，用于句柄快照中 File 对象过滤。 */
 extern POBJECT_TYPE* IoFileObjectType;
@@ -501,6 +582,262 @@ static NTSTATUS ArkEnumerateUdpPorts(
 }
 
 /**
+ * @brief 从 SOCKADDR_IN 提取 IPv4 与端口。
+ * @param buffer 地址缓冲。
+ * @param bufferLength 缓冲长度。
+ * @param ipv4NetworkOrder 输出 IPv4（网络字节序）。
+ * @param portHostOrder 输出端口（主机字节序）。
+ * @return 解析成功返回 TRUE。
+ * @irql PASSIVE_LEVEL
+ */
+static BOOLEAN ArkParseSockaddrIn(
+    _In_reads_bytes_(bufferLength) PVOID buffer,
+    _In_ ULONG bufferLength,
+    _Out_ PULONG ipv4NetworkOrder,
+    _Out_ PUSHORT portHostOrder
+) {
+    const ARK_SOCKADDR_IN* sockaddrIn = NULL;
+    if (buffer == NULL || ipv4NetworkOrder == NULL || portHostOrder == NULL) {
+        return FALSE;
+    }
+    if (bufferLength < sizeof(ARK_SOCKADDR_IN)) {
+        return FALSE;
+    }
+    sockaddrIn = (const ARK_SOCKADDR_IN*)buffer;
+    if (sockaddrIn->sin_family != ARK_AF_INET) {
+        return FALSE;
+    }
+    *ipv4NetworkOrder = sockaddrIn->sin_addr;
+    *portHostOrder = ARK_HTONS(sockaddrIn->sin_port);
+    return TRUE;
+}
+
+/**
+ * @brief 解析 AFD GET_ADDRESS / GET_REMOTE_ADDRESS 输出（TLI 或 TDI 布局）。
+ * @param buffer AFD 输出缓冲。
+ * @param bufferLength 缓冲长度。
+ * @param ipv4NetworkOrder 输出 IPv4（网络字节序）。
+ * @param portHostOrder 输出端口（主机字节序）。
+ * @return 解析成功返回 TRUE。
+ * @irql PASSIVE_LEVEL
+ */
+static BOOLEAN ArkParseAfdAddressBuffer(
+    _In_reads_bytes_(bufferLength) PUCHAR buffer,
+    _In_ ULONG bufferLength,
+    _Out_ PULONG ipv4NetworkOrder,
+    _Out_ PUSHORT portHostOrder
+) {
+    USHORT family = 0;
+    const ARK_TDI_ADDRESS_INFO* tdiInfo = NULL;
+    const ARK_TA_ADDRESS* taAddress = NULL;
+    const ARK_TDI_ADDRESS_IP* tdiIp = NULL;
+    if (buffer == NULL || ipv4NetworkOrder == NULL || portHostOrder == NULL) {
+        return FALSE;
+    }
+    if (bufferLength < sizeof(USHORT)) {
+        return FALSE;
+    }
+    family = *(const USHORT*)buffer;
+    if (family == ARK_AF_INET) {
+        return ArkParseSockaddrIn(buffer, bufferLength, ipv4NetworkOrder, portHostOrder);
+    }
+    if (bufferLength < FIELD_OFFSET(ARK_TDI_ADDRESS_INFO, Address.Address[0].Address) + sizeof(ARK_TDI_ADDRESS_IP)) {
+        return FALSE;
+    }
+    tdiInfo = (const ARK_TDI_ADDRESS_INFO*)buffer;
+    if (tdiInfo->Address.TAAddressCount == 0UL) {
+        return FALSE;
+    }
+    taAddress = &tdiInfo->Address.Address[0];
+    if (taAddress->AddressType != ARK_TDI_ADDRESS_TYPE_IP) {
+        return FALSE;
+    }
+    if (taAddress->AddressLength < sizeof(ARK_TDI_ADDRESS_IP)) {
+        return FALSE;
+    }
+    if (bufferLength < FIELD_OFFSET(ARK_TDI_ADDRESS_INFO, Address.Address[0].Address) +
+        (ULONG)taAddress->AddressLength) {
+        return FALSE;
+    }
+    tdiIp = (const ARK_TDI_ADDRESS_IP*)taAddress->Address;
+    *ipv4NetworkOrder = tdiIp->in_addr;
+    *portHostOrder = ARK_HTONS(tdiIp->sin_port);
+    return TRUE;
+}
+
+/**
+ * @brief 打开 AFD 端点句柄：优先 ObOpenObjectByPointer，失败则 ZwDuplicateObject。
+ * @param fileObject 句柄快照中的 FILE_OBJECT。
+ * @param pid 持有句柄的进程 PID。
+ * @param handleValue 用户态句柄值。
+ * @param afdHandle 输出内核句柄（OBJ_KERNEL_HANDLE）。
+ * @return 成功返回 STATUS_SUCCESS。
+ * @irql PASSIVE_LEVEL
+ */
+static NTSTATUS ArkOpenAfdHandle(
+    _In_opt_ PVOID fileObject,
+    _In_ ULONG pid,
+    _In_ USHORT handleValue,
+    _Out_ PHANDLE afdHandle
+) {
+    NTSTATUS status = STATUS_SUCCESS;
+    HANDLE processHandle = NULL;
+    OBJECT_ATTRIBUTES objectAttributes = { 0 };
+    CLIENT_ID clientId = { 0 };
+    if (afdHandle == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *afdHandle = NULL;
+    if (fileObject != NULL && IoFileObjectType != NULL && *IoFileObjectType != NULL) {
+		// 优先尝试 ObOpenObjectByPointer（内核对象指针已知时更安全）
+        status = ObOpenObjectByPointer(
+            fileObject,
+            OBJ_KERNEL_HANDLE,
+            NULL,
+            FILE_READ_DATA | SYNCHRONIZE,
+            *IoFileObjectType,
+            KernelMode,
+            afdHandle);
+        if (NT_SUCCESS(status)) {
+            return status;
+        }
+    }
+    if (pid == 0UL || handleValue == 0) {
+        return STATUS_INVALID_HANDLE;
+    }
+    InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    clientId.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
+    clientId.UniqueThread = NULL;
+	// ZwOpenProcess 需要 PROCESS_DUP_HANDLE 权限才能成功打开目标进程句柄
+    status = ZwOpenProcess(&processHandle, PROCESS_DUP_HANDLE, &objectAttributes, &clientId);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+	// ZwDuplicateObject 将目标进程的 AFD 句柄复制到当前内核进程
+    status = ZwDuplicateObject(
+        processHandle,
+        (HANDLE)(ULONG_PTR)handleValue,
+        NtCurrentProcess(),
+        afdHandle,
+        0,
+        0,
+        DUPLICATE_SAME_ACCESS);
+    ZwClose(processHandle);
+    return status;
+}
+
+/**
+ * @brief 对 AFD 句柄发送 IOCTL。
+ * @irql PASSIVE_LEVEL
+ */
+static NTSTATUS ArkAfdDeviceIoControl(
+    _In_ HANDLE afdHandle,
+    _In_ ULONG ioControlCode,
+    _In_opt_ PVOID inputBuffer,
+    _In_ ULONG inputLength,
+    _Out_writes_bytes_(outputLength) PVOID outputBuffer,
+    _In_ ULONG outputLength
+) {
+    IO_STATUS_BLOCK ioStatus = { 0 };
+    NTSTATUS status = STATUS_SUCCESS;
+    if (afdHandle == NULL || outputBuffer == NULL || outputLength == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    status = ZwDeviceIoControlFile(
+        afdHandle,
+        NULL,
+        NULL,
+        NULL,
+        &ioStatus,
+        ioControlCode,
+        inputBuffer,
+        inputLength,
+        outputBuffer,
+        outputLength);
+    if (NT_SUCCESS(status)) {
+        status = ioStatus.Status;
+    }
+    return status;
+}
+
+/**
+ * @brief 通过 AFD IOCTL 查询单条套接字的本地/远端地址与协议。
+ * @param afdHandle 已打开的 AFD 端点句柄。
+ * @param endpoint 输出解析结果。
+ * @return 至少解析到本地或远端地址时返回 STATUS_SUCCESS。
+ * @irql PASSIVE_LEVEL
+ */
+static NTSTATUS ArkQueryAfdEndpoint(
+    _In_ HANDLE afdHandle,
+    _Out_ ARK_AFD_PARSED_ENDPOINT* endpoint
+) {
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS remoteStatus = STATUS_SUCCESS;
+    ARK_SOCK_SHARED_INFO sharedInfo = { 0 };
+    UCHAR localBuffer[ARK_AFD_ADDRESS_BUFFER_BYTES] = { 0 };
+    UCHAR remoteBuffer[ARK_AFD_ADDRESS_BUFFER_BYTES] = { 0 };
+    if (afdHandle == NULL || endpoint == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(endpoint, sizeof(*endpoint));
+	// 初始化默认值
+    endpoint->Protocol = ARK_PORT_PROTO_UNKNOWN;
+	// 查询套接字共享信息（协议、状态等）
+    status = ArkAfdDeviceIoControl(
+        afdHandle,
+        ARK_IOCTL_AFD_GET_CONTEXT,
+        NULL,
+        0UL,
+        &sharedInfo,
+        sizeof(sharedInfo));
+    if (NT_SUCCESS(status)) {
+        endpoint->State = (ULONG)sharedInfo.State;
+		// 协议映射：AFD 的 ARK_IPPROTO_TCP/UDP 转为 ARK_PORT_PROTO_TCP/UDP
+        if (sharedInfo.Protocol == ARK_IPPROTO_TCP) {
+            endpoint->Protocol = ARK_PORT_PROTO_TCP;
+        } else if (sharedInfo.Protocol == ARK_IPPROTO_UDP) {
+            endpoint->Protocol = ARK_PORT_PROTO_UDP;
+        }
+    }
+	// 查询本地地址
+    status = ArkAfdDeviceIoControl(
+        afdHandle,
+        ARK_IOCTL_AFD_GET_ADDRESS,
+        NULL,
+        0UL,
+        localBuffer,
+        sizeof(localBuffer));
+    if (NT_SUCCESS(status)) {
+		// 解析 AFD 输出缓冲为 IPv4 + 端口
+        endpoint->HasLocal = ArkParseAfdAddressBuffer(
+            localBuffer,
+            sizeof(localBuffer),
+            &endpoint->LocalAddr,
+            &endpoint->LocalPort);
+    }
+	// 查询远端地址
+    remoteStatus = ArkAfdDeviceIoControl(
+        afdHandle,
+        ARK_IOCTL_AFD_GET_REMOTE_ADDRESS,
+        NULL,
+        0UL,
+        remoteBuffer,
+        sizeof(remoteBuffer));
+    if (NT_SUCCESS(remoteStatus)) {
+		// 解析 AFD 输出缓冲为 IPv4 + 端口
+        endpoint->HasRemote = ArkParseAfdAddressBuffer(
+            remoteBuffer,
+            sizeof(remoteBuffer),
+            &endpoint->RemoteAddr,
+            &endpoint->RemotePort);
+    }
+    if (endpoint->HasLocal || endpoint->HasRemote) {
+        return STATUS_SUCCESS;
+    }
+    return STATUS_NOT_FOUND;
+}
+
+/**
  * @brief 判断对象名是否以 \\Device\\Afd 为前缀（含 \\Device\\Afd\\Endpoint 等）。
  * @param objectName 对象名称。
  * @return 匹配返回 TRUE。
@@ -618,14 +955,11 @@ static NTSTATUS ArkQuerySystemHandleInformation(
 }
 
 /**
- * @brief View B：枚举系统句柄中 \\Device\\Afd 文件对象，按 PID 聚合写入响应。
+ * @brief View B：枚举系统句柄中 \\Device\\Afd 文件对象，逐句柄 IOCTL 解析地址。
  *
- * 优化相对错误样例：
- * - 不 ZwOpenProcess / ZwDuplicateObject（避免权限与句柄泄漏）
- * - 用 ObReferenceObjectByPointer(*IoFileObjectType) 校验类型
- * - 用 ObQueryNameString 取名，名称缓冲循环外复用
- * - 禁止在循环内挂 SEH 并提前 return 泄漏缓冲
- * - 不向用户态回传重复句柄（仅记 PID / 对象地址 / 计数）
+ * 对每个 AFD 句柄尝试 ObOpenObjectByPointer / ZwDuplicateObject 后调用
+ * IOCTL_AFD_GET_CONTEXT、GET_ADDRESS、GET_REMOTE_ADDRESS 解析五元组。
+ * AfdCount 为持有 AFD 句柄的去重 PID 数；AfdHandleCount 为扫描到的 AFD 句柄总数。
  *
  * @param response 输出响应。
  * @return 成功返回 STATUS_SUCCESS（无命中也算成功）。
@@ -637,10 +971,13 @@ static NTSTATUS ArkEnumerateAfdHandleView(
     NTSTATUS status = STATUS_SUCCESS;
     ARK_PORT_SYSTEM_HANDLE_INFORMATION* handleInfo = NULL;
     POBJECT_NAME_INFORMATION nameInfo = NULL;
-    ARK_AFD_PID_SLOT* slots = NULL;
-    ULONG slotCount = 0;
+    ARK_AFD_PID_SLOT* pidSlots = NULL;
+    ULONG pidSlotCount = 0;
     ULONG index = 0;
     ULONG nameReturnLength = 0;
+    ULONG afdHandleScanned = 0UL;
+    ULONG afdAddressQueries = 0UL;
+    ULONG afdAddressHits = 0UL;
     if (response == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -653,34 +990,39 @@ static NTSTATUS ArkEnumerateAfdHandleView(
         NonPagedPool,
         ARK_AFD_NAME_INFO_BYTES,
         ARK_PORT_TAG);
-    slots = (ARK_AFD_PID_SLOT*)ExAllocatePoolWithTag(
+    pidSlots = (ARK_AFD_PID_SLOT*)ExAllocatePoolWithTag(
         NonPagedPool,
         sizeof(ARK_AFD_PID_SLOT) * ARK_AFD_MAX_PID_SLOTS,
         ARK_PORT_TAG);
 #pragma warning(pop)
-    if (nameInfo == NULL || slots == NULL) {
+    if (nameInfo == NULL || pidSlots == NULL) {
         if (nameInfo != NULL) {
             ExFreePoolWithTag(nameInfo, ARK_PORT_TAG);
         }
-        if (slots != NULL) {
-            ExFreePoolWithTag(slots, ARK_PORT_TAG);
+        if (pidSlots != NULL) {
+            ExFreePoolWithTag(pidSlots, ARK_PORT_TAG);
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlZeroMemory(slots, sizeof(ARK_AFD_PID_SLOT) * ARK_AFD_MAX_PID_SLOTS);
+    RtlZeroMemory(pidSlots, sizeof(ARK_AFD_PID_SLOT) * ARK_AFD_MAX_PID_SLOTS);
     status = ArkQuerySystemHandleInformation(&handleInfo);
     if (!NT_SUCCESS(status) || handleInfo == NULL) {
         ExFreePoolWithTag(nameInfo, ARK_PORT_TAG);
-        ExFreePoolWithTag(slots, ARK_PORT_TAG);
+        ExFreePoolWithTag(pidSlots, ARK_PORT_TAG);
         return status;
     }
     for (index = 0; index < handleInfo->NumberOfHandles; ++index) {
         PVOID object = handleInfo->Handles[index].Object;
         ULONG pid = (ULONG)handleInfo->Handles[index].UniqueProcessId;
-        ARK_AFD_PID_SLOT* slot = NULL;
+        USHORT handleValue = handleInfo->Handles[index].HandleValue;
+        ARK_AFD_PID_SLOT* pidSlot = NULL;
+        HANDLE afdHandle = NULL;
+        ARK_AFD_PARSED_ENDPOINT endpoint = { 0 };
+        ARK_KERNEL_PORT_ENTRY portEntry = { 0 };
         if (object == NULL || pid == 0UL) {
             continue;
         }
+        // 引用内核对象，防止它在使用期间被意外释放
         status = ObReferenceObjectByPointer(
             object,
             FILE_READ_ATTRIBUTES,
@@ -691,46 +1033,72 @@ static NTSTATUS ArkEnumerateAfdHandleView(
         }
         RtlZeroMemory(nameInfo, ARK_AFD_NAME_INFO_BYTES);
         nameReturnLength = 0;
+		// 查询对象名，判断是否为 AFD 设备
         status = ObQueryNameString(
             object,
             nameInfo,
             ARK_AFD_NAME_INFO_BYTES,
             &nameReturnLength);
-        if (NT_SUCCESS(status) && ArkIsAfdDeviceName(&nameInfo->Name)) {
-            slot = ArkFindOrAddAfdPidSlot(slots, &slotCount, ARK_AFD_MAX_PID_SLOTS, pid);
-            if (slot != NULL) {
-                if (slot->HandleCount == 0UL) {
-                    slot->FirstObject = (ULONG64)(ULONG_PTR)object;
-                }
-                slot->HandleCount += 1UL;
+        if (!NT_SUCCESS(status) || !ArkIsAfdDeviceName(&nameInfo->Name)) {
+            ObDereferenceObject(object);
+            continue;
+        }
+		// 统计扫描到的 AFD 句柄总数
+        afdHandleScanned += 1UL;
+		// 统计持有 AFD 句柄的去重 PID
+        pidSlot = ArkFindOrAddAfdPidSlot(pidSlots, &pidSlotCount, ARK_AFD_MAX_PID_SLOTS, pid);
+        if (pidSlot != NULL) {
+            pidSlot->HandleCount += 1UL;
+            if (pidSlot->FirstObject == 0ULL) {
+                pidSlot->FirstObject = (ULONG64)(ULONG_PTR)object;
             }
         }
+        if (afdAddressQueries >= ARK_AFD_MAX_ADDRESS_QUERIES) {
+            ObDereferenceObject(object);
+            continue;
+        }
+        if (response->EntryCount >= ARK_MAX_PORT_ENTRIES) {
+            ObDereferenceObject(object);
+            continue;
+        }
+        // 查询 AFD 句柄的地址信息
+        afdAddressQueries += 1UL;
+        status = ArkOpenAfdHandle(object, pid, handleValue, &afdHandle);
+        if (NT_SUCCESS(status) && afdHandle != NULL) {
+            status = ArkQueryAfdEndpoint(afdHandle, &endpoint);
+            ZwClose(afdHandle);
+            afdHandle = NULL;
+        }
         ObDereferenceObject(object);
-    }
-    for (index = 0; index < slotCount; ++index) {
-        ARK_KERNEL_PORT_ENTRY portEntry = { 0 };
-        portEntry.Protocol = ARK_PORT_PROTO_UNKNOWN;
-        portEntry.State = slots[index].HandleCount;
-        portEntry.OwningPid = slots[index].Pid;
+        if (!NT_SUCCESS(status)) {
+            continue;
+        }
+        afdAddressHits += 1UL;
+        portEntry.Protocol = endpoint.Protocol;
+        portEntry.State = endpoint.State;
+        portEntry.OwningPid = pid;
         portEntry.ViewFlags = ARK_FLAG_VIEW_PORT_AFD;
-        portEntry.LocalAddr = 0UL;
-        portEntry.RemoteAddr = 0UL;
-        portEntry.LocalPort = 0;
-        portEntry.RemotePort = 0;
-        portEntry.EndpointObject = slots[index].FirstObject;
+        portEntry.LocalAddr = endpoint.LocalAddr;
+        portEntry.RemoteAddr = endpoint.RemoteAddr;
+        portEntry.LocalPort = endpoint.LocalPort;
+        portEntry.RemotePort = endpoint.RemotePort;
+        portEntry.EndpointObject = (ULONG64)(ULONG_PTR)object;
         ArkAppendPortEntry(response, &portEntry);
-        response->AfdCount += 1UL;
-        response->AfdHandleCount += slots[index].HandleCount;
     }
+    response->AfdCount = pidSlotCount;
+    response->AfdHandleCount = afdHandleScanned;
     {
         ULONG handleCount = handleInfo->NumberOfHandles;
         ExFreePoolWithTag(handleInfo, ARK_PORT_TAG);
         ExFreePoolWithTag(nameInfo, ARK_PORT_TAG);
-        ExFreePoolWithTag(slots, ARK_PORT_TAG);
-        LOGI("AFD view handles=%lu pids=%lu afdHandles=%lu",
+        ExFreePoolWithTag(pidSlots, ARK_PORT_TAG);
+        LOGI("AFD view handles=%lu scanned=%lu queries=%lu addrHits=%lu pids=%lu entries=%lu",
              handleCount,
+             afdHandleScanned,
+             afdAddressQueries,
+             afdAddressHits,
              response->AfdCount,
-             response->AfdHandleCount);
+             response->EntryCount);
     }
     return STATUS_SUCCESS;
 }

@@ -9,7 +9,7 @@
  */
 struct HiddenPortEntry {
     std::uint32_t protocol = 0;       /**< ARK_PORT_PROTO_* */
-    std::uint32_t state = 0;          /**< TCP 状态；AFD 视图为该 PID 的 AFD 句柄数 */
+    std::uint32_t state = 0;          /**< TCP 状态；AFD 视图为 SOCKET_STATE */
     std::uint32_t owningPid = 0;      /**< 所属进程 PID */
     std::uint32_t viewFlags = 0;      /**< 内核视图标志位 */
     std::uint32_t localAddr = 0;      /**< 本地 IPv4（网络字节序） */
@@ -26,8 +26,8 @@ struct HiddenPortEntry {
 /**
  * @brief 跨视图隐藏端口检测结果汇总。
  *
- * 检测公式：Hidden = ViewC_NSI − R3_union(前后两次 GetExtendedTcp/UdpTable)，
- * 再经 FilterHiddenPorts 去除 bound/回环/签名等误报；ViewB_AFD 仅作统计不计入隐藏。
+ * 检测公式：Hidden = (ViewC_NSI ∪ ViewB_AFD) − R3_union(前后两次 GetExtendedTcp/UdpTable)，
+ * 再经 FilterHiddenPorts 去除 bound/回环/签名等误报；无地址的 AFD 条目不参与隐藏结论。
  */
 struct CrossDetectPortResult {
     std::uint32_t status = 0;           /**< 操作状态码，ERROR_SUCCESS 表示成功 */
